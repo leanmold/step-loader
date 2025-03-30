@@ -1,6 +1,3 @@
-javascript
-
-// STEPLoader.js
 class STEPLoader {
   constructor() {
     this.entities = {};
@@ -26,7 +23,7 @@ class STEPLoader {
       const geometry = this.buildGeometry();
       console.log('Geometry vertices:', geometry.attributes.position.array);
 
-      const material = new THREE.LineBasicMaterial({ color: 0xff0000 }); // Red for visibility
+      const material = new THREE.LineBasicMaterial({ color: 0xff0000 });
       const mesh = new THREE.LineSegments(geometry, material);
       console.log('Mesh created');
       onLoad(mesh);
@@ -101,4 +98,3 @@ class STEPLoader {
 }
 
 window.STEPLoader = STEPLoader;
-
