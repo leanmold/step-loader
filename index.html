@@ -1,0 +1,164 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <style>
+    #viewerBox { width: 500px; height: 400px; border: 2px solid #ccc; margin: 10px auto; display: block; }
+    #uploadSection { text-align: center; margin: 10px; }
+  </style>
+</head>
+<body>
+  <div id="uploadSection">
+    <input type="file" id="cadFileInput" accept=".step" />
+    <p>Upload a .STEP file to view it:</p>
+  </div>
+  <canvas id="viewerBox"></canvas>
+
+  <script src="https://cdnjs.cloudflare.com/ajax/libs/three.js/r134/three.min.js"></script>
+  <script src="https://unpkg.com/three@0.134.0/examples/js/controls/OrbitControls.js"></script>
+  <script type="module">
+    import initOpenCascade from './opencascade.wasm.js';
+    initOpenCascade().then(oc => {
+        console.log('Open CASCADE loaded');
+        window.oc = oc; // Make oc available globally
+    });
+  </script>
+  <script>
+    // Scene setup
+    const scene = new THREE.Scene();
+    const camera = new THREE.PerspectiveCamera(75, 500 / 400, 0.1, 1000);
+    const renderer = new THREE.WebGLRenderer({ canvas: document.getElementById('viewerBox') });
+    renderer.setSize(500, 400);
+
+    const controls = new THREE.OrbitControls(camera, renderer.domElement);
+    controls.enableZoom = true;
+
+    scene.add(new THREE.AmbientLight(0xffffff, 1));
+    camera.position.set(15, 15, 15);
+    camera.lookAt(0, 0, 0);
+
+    const grid = new THREE.GridHelper(20, 20, 0x888888, 0x888888);
+    scene.add(grid);
+
+    const testGeo = new THREE.BufferGeometry().setFromPoints([
+      new THREE.Vector3(0, 0, 0),
+      new THREE.Vector3(10, 0, 10)
+    ]);
+    const testLine = new THREE.Line(testGeo, new THREE.LineBasicMaterial({ color: 0x00ff00, linewidth: 2 }));
+    scene.add(testLine);
+
+    function animate() {
+      requestAnimationFrame(animate);
+      controls.update();
+      renderer.render(scene, camera);
+    }
+    animate();
+
+    let stepObject = null;
+
+    // Load Open CASCADE and handle STEP file
+    const fileInput = document.getElementById('cadFileInput');
+    fileInput.addEventListener('change', function(event) {
+      const file = event.target.files[0];
+      if (!file || !file.name.toLowerCase().endsWith('.step')) {
+        alert('Please upload a .STEP file.');
+        return;
+      }
+
+      const reader = new FileReader();
+      reader.onload = function(e) {
+        const fileContent = e.target.result;
+
+        // Write file to Open CASCADE's virtual filesystem
+        if (!window.oc) {
+          console.error('Open CASCADE not initialized');
+          return;
+        }
+        window.oc.FS.writeFile('model.step', fileContent);
+
+        // Read STEP file
+        const stepReader = new window.oc.STEPControl_Reader();
+        const readStatus = stepReader.ReadFile('model.step');
+        if (readStatus !== window.oc.IFSelect_ReturnStatus.IFSelect_RetDone) {
+          console.error('Failed to read STEP file');
+          return;
+        }
+
+        stepReader.TransferRoots();
+        const shape = stepReader.OneShape();
+
+        // Tessellate for rendering
+        const tess = new window.oc.BRepMesh_IncrementalMesh(shape, 0.1);
+        tess.Perform();
+
+        // Extract properties
+        const props = new window.oc.GProp_GProps();
+        window.oc.BRepGProp.VolumeProperties(shape, props);
+        const volume = props.Mass();
+        const density = 0.001; // Assume 1 g/cm³ = 0.001 g/mm³ (e.g., steel); adjust if known
+        const mass = volume * density;
+        console.log('Volume:', volume, 'mm³');
+        console.log('Mass (assuming density 0.001 g/mm³):', mass, 'g');
+
+        const bbox = new window.oc.Bnd_Box();
+        window.oc.BRepBndLib.Add(shape, bbox);
+        const size = {
+          x: bbox.CornerMax().X() - bbox.CornerMin().X(),
+          y: bbox.CornerMax().Y() - bbox.CornerMin().Y(),
+          z: bbox.CornerMax().Z() - bbox.CornerMin().Z()
+        };
+        console.log('Size:', size, 'mm');
+
+        // Convert to Three.js mesh
+        const vertices = [];
+        const indices = [];
+        const explorer = new window.oc.TopExp_Explorer(shape, window.oc.TopAbs_ShapeEnum.TopAbs_FACE);
+        let vertexIndex = 0;
+
+        while (explorer.More()) {
+          console.log('Processing face');
+          const face = window.oc.TopoDS.Face(explorer.Current());
+          const triangulation = window.oc.BRep_Tool.Triangulation(face, new window.oc.TopLoc_Location());
+          if (!triangulation.IsNull()) {
+            console.log('Triangulation found');
+            const nodes = triangulation.get().Nodes();
+            const triangles = triangulation.get().Triangles();
+            console.log('Nodes:', nodes.Length(), 'Triangles:', triangles.Length());
+            for (let i = 1; i <= nodes.Length(); i++) {
+              const point = nodes.Value(i);
+              vertices.push(point.X(), point.Y(), point.Z());
+            }
+            for (let i = 1; i <= triangles.Length(); i++) {
+              const tri = triangles.Value(i);
+              indices.push(tri.Value(1) - 1 + vertexIndex, tri.Value(2) - 1 + vertexIndex, tri.Value(3) - 1 + vertexIndex);
+            }
+            vertexIndex += nodes.Length();
+          } else {
+            console.log('Triangulation is null');
+          }
+          explorer.Next();
+        }
+        console.log('Vertices:', vertices.length, 'Indices:', indices.length);
+
+        const geometry = new THREE.BufferGeometry();
+        geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3));
+        geometry.setIndex(indices);
+        const material = new THREE.MeshBasicMaterial({ color: 0xff0000, side: THREE.DoubleSide });
+
+        if (stepObject) scene.remove(stepObject);
+        stepObject = new THREE.Mesh(geometry, material);
+        scene.add(stepObject);
+
+        // Adjust camera
+        const box = new THREE.Box3().setFromObject(scene);
+        const center = box.getCenter(new THREE.Vector3());
+        const size3js = box.getSize(new THREE.Vector3());
+        const maxDim = Math.max(size3js.x, size3js.y, size3js.z, 10);
+        camera.position.set(center.x + maxDim * 1.5, center.y + maxDim * 1.5, center.z + maxDim * 1.5);
+        controls.target = center;
+        controls.update();
+      };
+      reader.readAsText(file);
+    });
+  </script>
+</body>
+</html>
